@@ -1,0 +1,9 @@
+manifest_version = 1
+
+[module]
+name = "Scraper"
+id = "scraper"
+description = "Scraper"
+version = "1.0.0"
+license = "GNU GPLv3"
+authors = ["Fripe"]
