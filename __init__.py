@@ -6,6 +6,7 @@ import discord
 from discord import app_commands, Message
 
 import breadcord
+from .helpers.modified_internals import GuildScraperHelper
 
 
 class Scraper(breadcord.module.ModuleCog):
@@ -15,8 +16,10 @@ class Scraper(breadcord.module.ModuleCog):
         self.scraped_channels_path = self.module.storage_path / "scraped channels"
 
     async def scrape_guild(self, guild: discord.Guild, message_limit: int = 100):
-        # TODO: 
+        # TODO: Add support for scraping more guild data
         metadata = await self.bot.http.get_guild(guild.id, with_counts=True)
+        metadata["members"] = [member async for member in GuildScraperHelper.fetch_members(guild, self.bot.http)]
+
         channels = []
         for channel in guild.channels:
             try:
