@@ -1,0 +1,12 @@
+manifest_version = 1
+
+[module]
+name = "Scraper"
+id = "scraper"
+description = "Allows scraping information from guilds and guild channels"
+version = "2.0.0"
+license = "GNU GPLv3"
+authors = ["Fripe"]
+requirements = [
+    "aiofiles"
+]
