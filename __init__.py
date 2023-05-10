@@ -150,7 +150,7 @@ class Scraper(breadcord.module.ModuleCog):
         notify_when_done="If the bot should ping you when it's done scraping.",
         scrape_threads="If the bot should scrape threads.",
     )
-    @app_commands.check(breadcord.commands.administrator_check)
+    @app_commands.check(breadcord.helpers.administrator_check)
     async def scrape(
         self,
         interaction: discord.Interaction,
