@@ -209,7 +209,8 @@ class Scraper(breadcord.module.ModuleCog):
                 await self.scrape_guild_metadata(interaction.guild, guild_path / "guild_metadata.json")
 
                 for index, guild_channel in enumerate(channels := interaction.guild.channels):
-                    await message.edit(content=f"Scraping {index+1}/{len(channels)} channels...")
+                    await message.edit(content=f"Scraping {index+1}/{len(channels)} channels... "
+                                               f"({guild_channel.mention})")
                     await self.scrape_channel(
                         guild_channel,
                         save_dir=(save_dir := guild_path / str(guild_channel.id)),
