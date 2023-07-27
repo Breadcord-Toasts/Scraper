@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import aiofiles
+import aiohttp
 import discord
 import discord.http
 from discord import app_commands
@@ -22,13 +23,20 @@ class GuildMessageable(discord.abc.GuildChannel, discord.abc.Messageable):
 class Scraper(breadcord.module.ModuleCog):
     def __init__(self, module_id: str, /):
         super().__init__(module_id)
+        self.session: aiohttp.ClientSession | None = None
+
+    async def cog_load(self) -> None:
+        self.session = aiohttp.ClientSession()
+
+    async def cog_unload(self) -> None:
+        await self.session.close()
 
     async def scrape_channel(
         self,
         channel: discord.abc.GuildChannel,
-        /,
+        /, *,
         save_dir: Path,
-        *,
+        attachment_save_dir: Path | None = None,
         message_limit: int | None,
         include_threads: bool = False
     ) -> None:
@@ -39,8 +47,9 @@ class Scraper(breadcord.module.ModuleCog):
             channel: GuildMessageable
             await self.scrape_channel_messages(
                 channel,
-                save_dir / f"{channel.id}_messages.json",
-                message_limit=message_limit
+                message_save_path=save_dir / f"{channel.id}_messages.json",
+                attachment_save_dir=attachment_save_dir,
+                message_limit=message_limit,
             )
 
         if include_threads and hasattr(channel, "threads"):
@@ -52,27 +61,43 @@ class Scraper(breadcord.module.ModuleCog):
                 if message_limit is None or message_limit > 0:
                     await self.scrape_channel_messages(
                         thread,
-                        thread_dir / f"{thread.id}_messages.json",
-                        message_limit=message_limit
+                        message_save_path=thread_dir / f"{thread.id}_messages.json",
+                        attachment_save_dir=attachment_save_dir,
+                        message_limit=message_limit,
                     )
 
     async def scrape_channel_messages(
-        self, channel: discord.abc.Messageable, /, save_path: Path, *, message_limit: int | None = 100
+        self,
+        channel: GuildMessageable | discord.Thread,
+        /, *,
+        message_save_path: Path,
+        attachment_save_dir: Path | None = None,
+        message_limit: int | None = 100
     ) -> None:
         self.logger.debug(f"Scraping messages in {logger_channel_reference(channel)}...")
-        save_path.parent.mkdir(parents=True, exist_ok=True)
+        message_save_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            async with aiofiles.open(save_path, mode="w", encoding="utf-8") as file:
+            async with aiofiles.open(message_save_path, mode="w", encoding="utf-8") as messages_file:
                 # If a channel has a lot of messages, we can get a MemoryError on machines without a lot of RAM
                 # thus, we write each message one by one instead of them all in a list and then writing that
-                await file.write("[")
+                await messages_file.write("[")
                 first_element = True
                 async for message in fetch_channel_history(channel, message_limit=message_limit):
-                    await file.write(("" if first_element else ",") + json.dumps(message))
+                    if attachment_save_dir is not None:
+                        attachment_save_dir.mkdir(parents=True, exist_ok=True)
+                        for attachment in message.get("attachments", []):
+                            if (url := attachment.get("proxy_url") or attachment.get("url")) is None:
+                                continue
+                            async with aiofiles.open(
+                                attachment_save_dir / f"{attachment['id']} {attachment['filename']}",
+                                mode="wb"
+                            ) as attachment_file, self.session.get(url) as response:
+                                await attachment_file.write(await response.read())
+                    await messages_file.write(("" if first_element else ",") + json.dumps(message))
                     first_element = False
-                await file.write("]")
+                await messages_file.write("]")
         except discord.HTTPException as error:
-            save_path.unlink(missing_ok=True)
+            message_save_path.unlink(missing_ok=True)
             self.logger.debug(f"Failed to scrape messages in {logger_channel_reference(channel)}: {error}")
         else:
             self.logger.debug(f"Finished scraping messages in {logger_channel_reference(channel)}.")
@@ -157,7 +182,8 @@ class Scraper(breadcord.module.ModuleCog):
         channel: discord.abc.GuildChannel | None = None,
         message_limit: int | None = None,
         notify_when_done: bool = False,
-        scrape_threads: bool = True
+        scrape_threads: bool = True,
+        download_attachments: bool = False,
     ):
         if not interaction.guild:
             await interaction.response.send_message("This command can only be used in a guild.", ephemeral=True)
@@ -174,30 +200,36 @@ class Scraper(breadcord.module.ModuleCog):
             return
         await interaction.response.send_message("Starting to scrape.", ephemeral=True)
 
-        if channel is None:
-            guild_path = self.module.storage_path / "guilds" / str(interaction.guild.id)
-            guild_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if channel is None:
+                guild_path = self.module.storage_path / "guilds" / str(interaction.guild.id)
+                guild_path.parent.mkdir(parents=True, exist_ok=True)
 
-            await message.edit(content="Scraping guild metadata...")
-            await self.scrape_guild_metadata(interaction.guild, guild_path / "guild_metadata.json")
+                await message.edit(content="Scraping guild metadata...")
+                await self.scrape_guild_metadata(interaction.guild, guild_path / "guild_metadata.json")
 
-            for index, guild_channel in enumerate(channels := interaction.guild.channels):
-                await message.edit(content=f"Scraping {index+1}/{len(channels)} channels...")
+                for index, guild_channel in enumerate(channels := interaction.guild.channels):
+                    await message.edit(content=f"Scraping {index+1}/{len(channels)} channels...")
+                    await self.scrape_channel(
+                        guild_channel,
+                        save_dir=(save_dir := guild_path / str(guild_channel.id)),
+                        attachment_save_dir=save_dir / "attachments" if download_attachments else None,
+                        message_limit=message_limit,
+                        include_threads=scrape_threads
+                    )
+            else:
+                await message.edit(content="Scraping channel...")
                 await self.scrape_channel(
-                    guild_channel,
-                    guild_path / str(guild_channel.id),
+                    channel,
+                    save_dir=(save_dir :=self.module.storage_path / "channels" / str(channel.id)),
+                    attachment_save_dir=save_dir / "attachments" if download_attachments else None,
                     message_limit=message_limit,
                     include_threads=scrape_threads
                 )
-        else:
-            await message.edit(content="Scraping channel...")
-            await self.scrape_channel(
-                channel,
-                self.module.storage_path / "channels" / str(channel.id),
-                message_limit=message_limit,
-                include_threads=scrape_threads
-            )
-        await message.edit(content="Finished scraping.")
+            await message.edit(content="Finished scraping.")
+        except Exception:
+            await message.reply(f"{interaction.user.mention} Scrape failed")
+            raise
 
         if notify_when_done:
             await message.reply(interaction.user.mention)

@@ -1,14 +1,13 @@
 import datetime
 from collections.abc import AsyncIterator
-from typing import Optional, Union
+from typing import Union
 
 import discord
 
-SnowflakeTime = Union["Snowflake", datetime]
-
 
 async def fetch_channel_history(
-    channel: discord.abc.Messageable, /, *, message_limit: int | None = 100
+    channel: discord.abc.GuildChannel | discord.Thread, /,
+    *, message_limit: int | None = 100
 ) -> AsyncIterator[dict]:
     # Simplified version of
     # https://github.com/Rapptz/discord.py/blob/742630f1441d4b0b12a5fd9a751ab5cd1b39a5c6/discord/abc.py#L1647
@@ -19,7 +18,7 @@ async def fetch_channel_history(
             return
 
         before_id = before.id if before else None
-        # noinspection PyProtectedMember
+        # noinspection PyProtectedMember,PyUnresolvedReferences
         data = await channel._state.http.logs_from(channel.id, retrieve, before=before_id)
 
         if data:
@@ -35,7 +34,10 @@ async def fetch_channel_history(
 
 
 async def fetch_members(
-    guild: discord.Guild, /, *, limit: Optional[int] = 1000, after: SnowflakeTime = discord.utils.MISSING
+    guild: discord.Guild,
+    /, *,
+    limit: int | None = 1000,
+    after: Union[discord.abc.Snowflake, datetime] = discord.utils.MISSING
 ) -> AsyncIterator[dict]:
     # Modified to not yield discord.Member objects, but instead just the raw data
     # https://github.com/Rapptz/discord.py/blob/16f1760dd08a91649f594799fff4c39bdf52c0ac/discord/guild.py#L2225
@@ -70,12 +72,7 @@ async def fetch_members(
         for raw_member in reversed(data):
             yield raw_member
 
-async def fetch_bans(
-    guild: discord.Guild,
-    /,
-    *,
-    limit: Optional[int] = 1000
-) -> AsyncIterator[dict]:
+async def fetch_bans(guild: discord.Guild, /, *, limit: int | None = 1000) -> AsyncIterator[dict]:
     # Simplified version of
     # https://github.com/Rapptz/discord.py/blob/16f1760dd08a91649f594799fff4c39bdf52c0ac/discord/guild.py#L2225
 
@@ -83,7 +80,7 @@ async def fetch_bans(
     # noinspection PyProtectedMember
     endpoint = guild._state.http.get_bans
 
-    async def _after_strategy(retrieve: int, after: Optional[discord.abc.Snowflake], limit: Optional[int]):
+    async def _after_strategy(retrieve: int, after: discord.abc.Snowflake | None, limit: int | None):
         after_id = after.id if after else None
         data = await endpoint(guild.id, limit=retrieve, after=after_id)
 
