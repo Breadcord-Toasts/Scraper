@@ -93,7 +93,10 @@ class Scraper(breadcord.module.ModuleCog):
                                 mode="wb"
                             ) as attachment_file, self.session.get(url) as response:
                                 await attachment_file.write(await response.read())
-                    await messages_file.write(("" if first_element else ",") + json.dumps(message))
+                    await messages_file.write(("" if first_element else ",") + json.dumps(
+                        message,
+                        separators=(",", ":") # Removes useless whitespace
+                    ))
                     first_element = False
                 await messages_file.write("]")
         except discord.HTTPException as error:
@@ -122,7 +125,10 @@ class Scraper(breadcord.module.ModuleCog):
                 with contextlib.suppress(discord.HTTPException):
                     channel_data.update({"invites": await http.invites_from_channel(channel.id)})
 
-                await file.write(json.dumps(channel_data))
+                await file.write(json.dumps(
+                    channel_data,
+                    separators=(",", ":")  # Removes useless whitespace
+                ))
         except discord.HTTPException as error:
             save_path.unlink(missing_ok=True)
             self.logger.debug(f"Failed to scrape metadata of {logger_channel_reference(channel)}: {error}")
@@ -165,7 +171,10 @@ class Scraper(breadcord.module.ModuleCog):
             with contextlib.suppress(discord.Forbidden):
                 guild_data.update({"widget": await http.get_widget(guild.id)})
 
-            await file.write(json.dumps(guild_data))
+            await file.write(json.dumps(
+                guild_data,
+                separators=(",", ":")  # Removes useless whitespace
+            ))
         self.logger.debug(f"Finished scraping metadata of guild {guild.name} ({guild.id}).")
 
     @app_commands.command(description="Scrape the messages of an entire guild or a specific channel.")
