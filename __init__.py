@@ -231,7 +231,7 @@ class Scraper(breadcord.module.ModuleCog):
                 await message.edit(content="Scraping channel...")
                 await self.scrape_channel(
                     channel,
-                    save_dir=(save_dir :=self.module.storage_path / "channels" / str(channel.id)),
+                    save_dir=(save_dir := self.module.storage_path / "channels" / str(channel.id)),
                     attachment_save_dir=save_dir / "attachments" if download_attachments else None,
                     message_limit=message_limit,
                     include_threads=scrape_threads

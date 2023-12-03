@@ -6,8 +6,9 @@ import discord
 
 
 async def fetch_channel_history(
-    channel: discord.abc.GuildChannel | discord.Thread, /,
-    *, message_limit: int | None = 100
+    channel: discord.abc.GuildChannel | discord.Thread,
+    /, *,
+    message_limit: int | None = 100
 ) -> AsyncIterator[dict]:
     # Simplified version of
     # https://github.com/Rapptz/discord.py/blob/742630f1441d4b0b12a5fd9a751ab5cd1b39a5c6/discord/abc.py#L1647
@@ -71,6 +72,7 @@ async def fetch_members(
 
         for raw_member in reversed(data):
             yield raw_member
+
 
 async def fetch_bans(guild: discord.Guild, /, *, limit: int | None = 1000) -> AsyncIterator[dict]:
     # Simplified version of
