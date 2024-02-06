@@ -12,20 +12,21 @@ async def fetch_channel_history(
 ) -> AsyncIterator[dict]:
     # Simplified version of
     # https://github.com/Rapptz/discord.py/blob/742630f1441d4b0b12a5fd9a751ab5cd1b39a5c6/discord/abc.py#L1647
-    before = None
+    after = discord.Object(id=0)  # discord.object.OLDEST_OBJECT
     while True:
         retrieve = min(100 if message_limit is None else message_limit, 100)
         if retrieve < 1:
             return
 
-        before_id = before.id if before else None
+        after_id = after.id if after else None
         # noinspection PyProtectedMember,PyUnresolvedReferences
-        data = await channel._state.http.logs_from(channel.id, retrieve, before=before_id)
+        data = await channel._state.http.logs_from(channel.id, retrieve, after=after_id)
+        data.reverse()
 
         if data:
             if message_limit is not None:
                 message_limit -= len(data)
-            before = discord.Object(id=int(data[-1]["id"]))
+            after = discord.Object(id=int(data[0]['id']))
 
         if len(data) < 100:
             message_limit = 0

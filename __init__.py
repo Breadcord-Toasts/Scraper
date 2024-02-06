@@ -95,7 +95,7 @@ class Scraper(breadcord.module.ModuleCog):
                                 await attachment_file.write(await response.read())
                     await messages_file.write(("" if first_element else ",") + json.dumps(
                         message,
-                        separators=(",", ":") # Removes useless whitespace
+                        separators=(",", ":")  # Removes useless whitespace
                     ))
                     first_element = False
                 await messages_file.write("]")
