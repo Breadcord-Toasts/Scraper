@@ -1,6 +1,9 @@
+import asyncio
 import contextlib
 import json
+from collections.abc import Generator, Collection
 from pathlib import Path
+from typing import TypeVar
 
 import aiofiles
 import aiohttp
@@ -11,9 +14,16 @@ from discord import app_commands
 import breadcord
 from .helpers.modified_internals import fetch_channel_history, fetch_members, fetch_bans
 
+_T = TypeVar("_T")
+
 
 def logger_channel_reference(channel: discord.abc.Messageable | discord.abc.GuildChannel, /) -> str:
     return f"{type(channel).__name__} {channel.name} ({channel.id})"
+
+
+def chunked(iterable: Collection[_T], chunk_size: int, /) -> Generator[list[_T], None, None]:
+    for index in range(0, len(iterable), chunk_size):
+        yield iterable[index:index + chunk_size]
 
 
 class GuildMessageable(discord.abc.GuildChannel, discord.abc.Messageable):
@@ -24,6 +34,7 @@ class Scraper(breadcord.module.ModuleCog):
     def __init__(self, module_id: str, /):
         super().__init__(module_id)
         self.session: aiohttp.ClientSession | None = None
+        self.simultaneous_channels = 8
 
     async def cog_load(self) -> None:
         self.session = aiohttp.ClientSession()
@@ -217,16 +228,20 @@ class Scraper(breadcord.module.ModuleCog):
                 await message.edit(content="Scraping guild metadata...")
                 await self.scrape_guild_metadata(interaction.guild, guild_path / "guild_metadata.json")
 
-                for index, guild_channel in enumerate(channels := interaction.guild.channels):
-                    await message.edit(content=f"Scraping {index+1}/{len(channels)} channels... "
-                                               f"({guild_channel.mention})")
-                    await self.scrape_channel(
-                        guild_channel,
-                        save_dir=(save_dir := guild_path / str(guild_channel.id)),
-                        attachment_save_dir=save_dir / "attachments" if download_attachments else None,
-                        message_limit=message_limit,
-                        include_threads=scrape_threads
-                    )
+                # Scrape multiple channels at once
+                for chunk in chunked(interaction.guild.channels, self.simultaneous_channels):
+                    await message.edit(content=f"Scraping channels {chunk[0].mention} - {chunk[-1].mention}")
+
+                    to_scrape = []
+                    for guild_channel in chunk:
+                        to_scrape.append(self.scrape_channel(
+                            guild_channel,
+                            save_dir=(save_dir := guild_path / str(guild_channel.id)),
+                            attachment_save_dir=save_dir / "attachments" if download_attachments else None,
+                            message_limit=message_limit,
+                            include_threads=scrape_threads
+                        ))
+                    await asyncio.gather(*to_scrape)
             else:
                 await message.edit(content="Scraping channel...")
                 await self.scrape_channel(
