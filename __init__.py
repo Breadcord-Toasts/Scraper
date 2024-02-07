@@ -56,7 +56,7 @@ class GuildMessageable(discord.abc.GuildChannel, discord.abc.Messageable):
 
 
 class Scraper(breadcord.module.ModuleCog):
-    def __init__(self, module_id: str, /):
+    def __init__(self, module_id: str, /) -> None:
         super().__init__(module_id)
         self.session: aiohttp.ClientSession | None = None
         self.simultaneous_channels = 8
@@ -242,7 +242,7 @@ class Scraper(breadcord.module.ModuleCog):
         notify_when_done: bool = False,
         scrape_threads: bool = True,
         download_attachments: bool = False,
-    ):
+    ) -> None:
         if not interaction.guild:
             await interaction.response.send_message("This command can only be used in a guild.", ephemeral=True)
             return
@@ -299,5 +299,5 @@ class Scraper(breadcord.module.ModuleCog):
             await message.reply(interaction.user.mention)
 
 
-async def setup(bot: breadcord.Bot):
+async def setup(bot: breadcord.Bot) -> None:
     await bot.add_cog(Scraper("scraper"))
