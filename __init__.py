@@ -95,9 +95,10 @@ class Scraper(breadcord.module.ModuleCog):
         if (include_threads and hasattr(channel, "threads")) or isinstance(channel, discord.ForumChannel):
             all_threads = channel.threads
             if hasattr(channel, "archived_threads"):
-                async for thread in channel.archived_threads():
-                    if not any(thread.id == t.id for t in all_threads):
-                        all_threads.append(thread)
+                with contextlib.suppress(discord.Forbidden):
+                    async for thread in channel.archived_threads():
+                        if not any(thread.id == t.id for t in all_threads):
+                            all_threads.append(thread)
 
             if all_threads:
                 self.logger.debug(f"Scraping threads in {logger_channel_reference(channel)}...")
