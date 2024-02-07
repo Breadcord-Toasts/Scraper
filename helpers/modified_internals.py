@@ -12,27 +12,29 @@ async def fetch_channel_history(
 ) -> AsyncIterator[dict]:
     # Simplified version of
     # https://github.com/Rapptz/discord.py/blob/742630f1441d4b0b12a5fd9a751ab5cd1b39a5c6/discord/abc.py#L1647
-    after = discord.Object(id=0)  # discord.object.OLDEST_OBJECT
+    # using only the "after" strategy
+
+    after_message = discord.Object(id=0)
     while True:
-        retrieve = min(100 if message_limit is None else message_limit, 100)
-        if retrieve < 1:
+        retrieve_count = 100 if message_limit is None else min(message_limit, 100)
+        if retrieve_count < 1:
             return
 
-        after_id = after.id if after else None
-        # noinspection PyProtectedMember,PyUnresolvedReferences
-        data = await channel._state.http.logs_from(channel.id, retrieve, after=after_id)
-        data.reverse()
-
+        after_id = after_message.id if after_message else None
+        # noinspection PyProtectedMember
+        data = await channel._state.http.logs_from(channel.id, retrieve_count, after=after_id)
         if data:
             if message_limit is not None:
                 message_limit -= len(data)
-            after = discord.Object(id=int(data[0]['id']))
+            after_message = discord.Object(id=int(data[0]['id']))
 
-        if len(data) < 100:
-            message_limit = 0
+        data = reversed(data)
+        count = 0
+        for count, raw_message in enumerate(data, 1):
+            yield raw_message
 
-        for msg in data:
-            yield msg
+        if count < 100:
+            break
 
 
 async def fetch_members(
@@ -108,7 +110,6 @@ async def fetch_bans(guild: discord.Guild, /, *, limit: int | None = 1000) -> As
             limit = 0
 
         for ban in data:
-            # yield discord.BanEntry(user=discord.User(state=self._state, data=ban['user']), reason=ban['reason'])
             yield ban
 
 

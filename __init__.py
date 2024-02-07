@@ -1,7 +1,7 @@
 import asyncio
 import contextlib
 import json
-from collections.abc import Generator, Collection
+from collections.abc import Generator, Collection, Coroutine
 from pathlib import Path
 from typing import TypeVar
 
@@ -24,6 +24,31 @@ def logger_channel_reference(channel: discord.abc.Messageable | discord.abc.Guil
 def chunked(iterable: Collection[_T], chunk_size: int, /) -> Generator[list[_T], None, None]:
     for index in range(0, len(iterable), chunk_size):
         yield iterable[index:index + chunk_size]
+
+
+async def gather_with_limit(
+    *coros_or_futures: asyncio.Future[_T] | Coroutine[None, None, _T],
+    limit: int,
+    return_exceptions: bool = False
+) -> list[_T | Exception]:
+    """Operates like asyncio.gather() but never runs more than `limit` of the given coroutines at once."""
+    pending = list(coros_or_futures)
+    running = []
+    results = []
+    while pending or running:
+        while len(running) < limit and pending:
+            running.append(asyncio.ensure_future(pending.pop(0)))
+        done, running = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            try:
+                task.result()
+            except Exception as error:
+                if return_exceptions:
+                    results.append(error)
+                else:
+                    raise error
+        running = [task for task in running if not task.done()]
+    return results
 
 
 class GuildMessageable(discord.abc.GuildChannel, discord.abc.Messageable):
@@ -54,6 +79,10 @@ class Scraper(breadcord.module.ModuleCog):
         save_dir.mkdir(parents=True, exist_ok=True)
 
         await self.scrape_channel_metadata(channel, save_dir / f"{channel.id}_metadata.json")
+        # Categories don't have messages
+        if isinstance(channel, discord.CategoryChannel):
+            return
+
         if (message_limit is None or message_limit > 0) and hasattr(channel, "history"):
             channel: GuildMessageable
             await self.scrape_channel_messages(
@@ -63,8 +92,17 @@ class Scraper(breadcord.module.ModuleCog):
                 message_limit=message_limit,
             )
 
-        if include_threads and hasattr(channel, "threads"):
-            for thread in channel.threads:
+        if (include_threads and hasattr(channel, "threads")) or isinstance(channel, discord.ForumChannel):
+            all_threads = channel.threads
+            if hasattr(channel, "archived_threads"):
+                async for thread in channel.archived_threads():
+                    if not any(thread.id == t.id for t in all_threads):
+                        all_threads.append(thread)
+
+            if all_threads:
+                self.logger.debug(f"Scraping threads in {logger_channel_reference(channel)}...")
+
+            for thread in all_threads:
                 thread: discord.Thread
                 thread_dir = save_dir / "threads" / str(thread.id)
 
@@ -228,20 +266,21 @@ class Scraper(breadcord.module.ModuleCog):
                 await message.edit(content="Scraping guild metadata...")
                 await self.scrape_guild_metadata(interaction.guild, guild_path / "guild_metadata.json")
 
+                await message.edit(content="Scraping channels...")
                 # Scrape multiple channels at once
-                for chunk in chunked(interaction.guild.channels, self.simultaneous_channels):
-                    await message.edit(content=f"Scraping channels {chunk[0].mention} - {chunk[-1].mention}")
-
-                    to_scrape = []
-                    for guild_channel in chunk:
-                        to_scrape.append(self.scrape_channel(
+                await gather_with_limit(
+                    *(
+                        self.scrape_channel(
                             guild_channel,
                             save_dir=(save_dir := guild_path / str(guild_channel.id)),
                             attachment_save_dir=save_dir / "attachments" if download_attachments else None,
                             message_limit=message_limit,
                             include_threads=scrape_threads
-                        ))
-                    await asyncio.gather(*to_scrape)
+                        )
+                        for guild_channel in interaction.guild.channels
+                    ),
+                    limit=self.simultaneous_channels
+                )
             else:
                 await message.edit(content="Scraping channel...")
                 await self.scrape_channel(
