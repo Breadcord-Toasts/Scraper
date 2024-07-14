@@ -3,7 +3,7 @@ import contextlib
 import json
 from collections.abc import Generator, Coroutine
 from pathlib import Path
-from typing import TypeVar, Sequence, cast, Protocol
+from typing import TypeVar, Sequence, cast, Protocol, Callable
 
 import aiofiles
 import discord
@@ -67,14 +67,16 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
     async def scrape_channel(
         self,
         channel: discord.abc.GuildChannel,
-        /, *,
+        *,
+        discord_logger: Callable[[str, bool], None],
         save_dir: Path,
         attachment_save_dir: Path | None = None,
         message_limit: int | None,
-        include_threads: bool = False
+        include_threads: bool = False,
     ) -> None:
         save_dir.mkdir(parents=True, exist_ok=True)
 
+        discord_logger(f"Scraping data from {channel.mention}", False)
         await self.scrape_channel_metadata(channel, save_dir / f"{channel.id}_metadata.json")
         # Categories don't have messages
         if isinstance(channel, discord.CategoryChannel):
@@ -88,17 +90,19 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
                 attachment_save_dir=attachment_save_dir,
                 message_limit=message_limit,
             )
+            discord_logger(f"Finished scraping messages in {channel.mention}", False)
 
         if isinstance(channel, discord.ForumChannel) or (include_threads and hasattr(channel, "threads")):
-            all_threads = channel.threads  # type: ignore
+            all_threads = channel.threads  # type: ignore  # We checked with hasattr
             if hasattr(channel, "archived_threads"):
                 with contextlib.suppress(discord.Forbidden):
-                    async for thread in channel.archived_threads():  # type: ignore
+                    async for thread in channel.archived_threads():  # type: ignore  # We checked with hasattr
                         if not any(thread.id == t.id for t in all_threads):
                             all_threads.append(thread)
 
             if all_threads:
                 self.logger.debug(f"Scraping threads in {logger_channel_reference(channel)}...")
+                discord_logger(f"Scraping threads in {channel.mention}", False)
 
             for thread in all_threads:
                 thread_dir = save_dir / "threads" / str(thread.id)
@@ -111,6 +115,8 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
                         attachment_save_dir=attachment_save_dir,
                         message_limit=message_limit,
                     )
+            if all_threads:
+                discord_logger(f"Finished scraping threads in {channel.mention}", False)
 
     async def scrape_channel_messages(
         self,
@@ -122,8 +128,15 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
     ) -> None:
         self.logger.debug(f"Scraping messages in {logger_channel_reference(channel)}...")
         message_save_path.parent.mkdir(parents=True, exist_ok=True)
+
         if self.session is None or self.session.closed:
             raise ValueError("Session is closed.")
+
+        permissions = channel.permissions_for(channel.guild.me)
+        if not (permissions.read_message_history and permissions.read_messages):
+            self.logger.debug(f"Skipping {logger_channel_reference(channel)} due to missing permissions.")
+            return
+
         try:
             async with aiofiles.open(message_save_path, mode="w", encoding="utf-8") as messages_file:
                 # If a channel has a lot of messages, we can get a MemoryError on machines without a lot of RAM
@@ -154,7 +167,9 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
             self.logger.debug(f"Finished scraping messages in {logger_channel_reference(channel)}.")
 
     async def scrape_channel_metadata(
-        self, channel: discord.abc.GuildChannel | discord.Thread, /, save_path: Path
+        self,
+        channel: discord.abc.GuildChannel | discord.Thread,
+        save_path: Path,
     ) -> None:
         self.logger.debug(f"Scraping metadata of {logger_channel_reference(channel)}...")
         http = self.bot.http
@@ -183,9 +198,7 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
         else:
             self.logger.debug(f"Finished scraping metadata of {logger_channel_reference(channel)}.")
 
-    async def scrape_guild_metadata(
-        self, guild: discord.Guild, /, save_path: Path
-    ) -> None:
+    async def scrape_guild_metadata(self, guild: discord.Guild, save_path: Path) -> None:
         self.logger.debug(f"Scraping metadata of guild {guild.name} ({guild.id}).")
         http = self.bot.http
         save_path.parent.mkdir(exist_ok=True, parents=True)
@@ -232,6 +245,7 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
         notify_when_done="If the bot should ping you when it's done scraping.",
         scrape_threads="If the bot should scrape threads.",
         download_attachments="If the bot should download attachments. This will likely take up a lot of storage space.",
+        verbose_logging="If the bot should log its progress in a thread rather than editing the original message.",
     )
     @app_commands.check(breadcord.helpers.administrator_check)
     async def scrape(
@@ -242,28 +256,85 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
         notify_when_done: bool = False,
         scrape_threads: bool = True,
         download_attachments: bool = False,
+        verbose_logging: bool = False,
     ) -> None:
         if not interaction.guild:
             await interaction.response.send_message("This command can only be used in a guild.", ephemeral=True)
             return
+        if not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "This command can only be used in a text channel.",
+                ephemeral=True,
+            )
+            return
+        if verbose_logging and not interaction.channel.permissions_for(interaction.guild.me).create_public_threads:
+            await interaction.response.send_message(
+                "I need permission to create public threads in this channel to use verbose logging.",
+                ephemeral=True,
+            )
+            return
 
-        await interaction.response.defer()
-        message: discord.WebhookMessage = await interaction.followup.send("Scraping...", wait=True)
+        await interaction.response.send_message("Requested scrape.")
+        response_message: discord.Message = await interaction.channel.send("Scraping...")
+        logging_thread: discord.Thread | None = None
+        if verbose_logging:
+            logging_thread = await response_message.create_thread(
+                name="Scrape Log",
+                reason="Thread for verbosely logging the progress of the ongoing scrape.",
+            )
+
+        status_pool: list[tuple[str, bool]] = []
+
+        async def pool_report() -> bool:
+            nonlocal status_pool
+            status_pool = [(info, important) for info, important in status_pool if logging_thread or important]
+            if not status_pool:
+                return False
+
+            if not logging_thread:
+                await response_message.edit(content=status_pool[-1][0])
+                status_pool.clear()
+                return True
+
+            while status_pool:
+                joined = ""
+                while status_pool:
+                    info = status_pool[0][0]
+                    if len(joined) + len(info) > 2000:
+                        break
+                    joined += info + "\n"
+                    status_pool.pop(0)
+                await logging_thread.send(joined)
+            return True
+
+        async def pool_checker() -> None:
+            await asyncio.sleep(2)
+            while True:
+                if not status_pool:
+                    await asyncio.sleep(3)
+                    continue
+                await pool_report()
+
+        def add_to_pool(info: str, important: bool = True) -> None:
+            status_pool.append((info, important))
+
+        report_pool_task = asyncio.create_task(pool_checker())
 
         try:
             if channel is None:
                 guild_path = self.module.storage_path / "guilds" / str(interaction.guild.id)
                 guild_path.parent.mkdir(parents=True, exist_ok=True)
 
-                await message.edit(content="Scraping guild metadata...")
+                add_to_pool("Scraping guild metadata...")
                 await self.scrape_guild_metadata(interaction.guild, guild_path / "guild_metadata.json")
 
-                await message.edit(content="Scraping channels...")
+                add_to_pool("Scraping guild channels...")
                 # Scrape multiple channels at once
                 await gather_with_limit(
                     *(
                         self.scrape_channel(
-                            guild_channel,
+                            channel=guild_channel,
+                            discord_logger=add_to_pool,
                             save_dir=(save_dir := guild_path / str(guild_channel.id)),
                             attachment_save_dir=save_dir / "attachments" if download_attachments else None,
                             message_limit=message_limit,
@@ -274,21 +345,45 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
                     limit=self.simultaneous_channels
                 )
             else:
-                await message.edit(content="Scraping channel...")
                 await self.scrape_channel(
-                    channel,
+                    channel=channel,
+                    discord_logger=add_to_pool,
                     save_dir=(save_dir := self.module.storage_path / "channels" / str(channel.id)),
                     attachment_save_dir=save_dir / "attachments" if download_attachments else None,
                     message_limit=message_limit,
                     include_threads=scrape_threads
                 )
-            await message.edit(content="Finished scraping.")
         except Exception:
-            await message.reply(f"{interaction.user.mention} Scrape failed")
+            await response_message.edit(content="Scrape failed!")
+            if logging_thread:
+                await logging_thread.send("Scrape failed!")
+                if not logging_thread.archived:
+                    await logging_thread.edit(
+                        name="Scrape Log (Failed)",
+                        archived=(
+                            interaction.channel.permissions_for(interaction.guild.me).manage_threads
+                            or discord.utils.MISSING
+                        ),
+                    )
             raise
+        else:
+            await response_message.edit(content="Finished scraping.")
+            if logging_thread:
+                await logging_thread.send("Finished scraping.")
+                if not logging_thread.archived:
+                    await logging_thread.edit(
+                        name="Scrape Log (Finished)",
+                        archived=(
+                            interaction.channel.permissions_for(interaction.guild.me).manage_threads
+                            or discord.utils.MISSING
+                        ),
+                    )
+        finally:
+            report_pool_task.cancel()
+            await pool_report()  # In case any stragglers are left
 
         if notify_when_done:
-            await message.reply(interaction.user.mention)
+            await response_message.reply(content=f"{interaction.user.mention} Scraping is done!")
 
 
 async def setup(bot: breadcord.Bot) -> None:
