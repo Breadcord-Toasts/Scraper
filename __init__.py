@@ -1,12 +1,11 @@
 import asyncio
 import contextlib
 import json
-from collections.abc import Generator, Collection, Coroutine
+from collections.abc import Generator, Coroutine
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, Sequence, cast, Protocol
 
 import aiofiles
-import aiohttp
 import discord
 import discord.http
 from discord import app_commands
@@ -17,11 +16,20 @@ from .helpers.modified_internals import fetch_channel_history, fetch_members, fe
 _T = TypeVar("_T")
 
 
-def logger_channel_reference(channel: discord.abc.Messageable | discord.abc.GuildChannel, /) -> str:
+class GuildMessageable(discord.abc.GuildChannel, discord.abc.Messageable):
+    ...
+
+
+class Identifiable(Protocol):
+    id: int
+    name: str
+
+
+def logger_channel_reference(channel: Identifiable, /) -> str:
     return f"{type(channel).__name__} {channel.name} ({channel.id})"
 
 
-def chunked(iterable: Collection[_T], chunk_size: int, /) -> Generator[list[_T], None, None]:
+def chunked(iterable: Sequence[_T], chunk_size: int, /) -> Generator[Sequence[_T], None, None]:
     for index in range(0, len(iterable), chunk_size):
         yield iterable[index:index + chunk_size]
 
@@ -51,21 +59,10 @@ async def gather_with_limit(
     return results
 
 
-class GuildMessageable(discord.abc.GuildChannel, discord.abc.Messageable):
-    ...
-
-
-class Scraper(breadcord.module.ModuleCog):
+class Scraper(breadcord.helpers.HTTPModuleCog):
     def __init__(self, module_id: str, /) -> None:
         super().__init__(module_id)
-        self.session: aiohttp.ClientSession | None = None
         self.simultaneous_channels = 8
-
-    async def cog_load(self) -> None:
-        self.session = aiohttp.ClientSession()
-
-    async def cog_unload(self) -> None:
-        await self.session.close()
 
     async def scrape_channel(
         self,
@@ -84,19 +81,19 @@ class Scraper(breadcord.module.ModuleCog):
             return
 
         if (message_limit is None or message_limit > 0) and hasattr(channel, "history"):
-            channel: GuildMessageable
             await self.scrape_channel_messages(
-                channel,
+                # Above check establishes that the channel has a history method, meaning that it's messageable
+                cast(GuildMessageable | discord.Thread, channel),
                 message_save_path=save_dir / f"{channel.id}_messages.json",
                 attachment_save_dir=attachment_save_dir,
                 message_limit=message_limit,
             )
 
-        if (include_threads and hasattr(channel, "threads")) or isinstance(channel, discord.ForumChannel):
-            all_threads = channel.threads
+        if isinstance(channel, discord.ForumChannel) or (include_threads and hasattr(channel, "threads")):
+            all_threads = channel.threads  # type: ignore
             if hasattr(channel, "archived_threads"):
                 with contextlib.suppress(discord.Forbidden):
-                    async for thread in channel.archived_threads():
+                    async for thread in channel.archived_threads():  # type: ignore
                         if not any(thread.id == t.id for t in all_threads):
                             all_threads.append(thread)
 
@@ -104,7 +101,6 @@ class Scraper(breadcord.module.ModuleCog):
                 self.logger.debug(f"Scraping threads in {logger_channel_reference(channel)}...")
 
             for thread in all_threads:
-                thread: discord.Thread
                 thread_dir = save_dir / "threads" / str(thread.id)
 
                 await self.scrape_channel_metadata(thread, thread_dir / f"{thread.id}_metadata.json")
@@ -126,6 +122,8 @@ class Scraper(breadcord.module.ModuleCog):
     ) -> None:
         self.logger.debug(f"Scraping messages in {logger_channel_reference(channel)}...")
         message_save_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.session is None or self.session.closed:
+            raise ValueError("Session is closed.")
         try:
             async with aiofiles.open(message_save_path, mode="w", encoding="utf-8") as messages_file:
                 # If a channel has a lot of messages, we can get a MemoryError on machines without a lot of RAM
@@ -163,7 +161,7 @@ class Scraper(breadcord.module.ModuleCog):
         save_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             async with aiofiles.open(save_path, mode="w", encoding="utf-8") as file:
-                channel_data = await http.get_channel(channel.id)
+                channel_data = dict(await http.get_channel(channel.id))  # Type checker doesn't like TypedDict
                 channel_data.update({
                     "pins": await http.pins_from(channel.id),
                 })
@@ -192,7 +190,7 @@ class Scraper(breadcord.module.ModuleCog):
         http = self.bot.http
         save_path.parent.mkdir(exist_ok=True, parents=True)
         async with aiofiles.open(save_path, mode="w", encoding="utf-8") as file:
-            guild_data = await http.get_guild(guild.id, with_counts=True)
+            guild_data = dict(await http.get_guild(guild.id, with_counts=True))  # Type checker doesn't like TypedDict
             guild_data.update({
                 "channels": await http.get_all_guild_channels(guild.id),
                 "active_threads": await http.get_active_threads(guild.id),
@@ -233,6 +231,7 @@ class Scraper(breadcord.module.ModuleCog):
         message_limit="How many messages should be scraped in each channel. Newest messages are scraped first.",
         notify_when_done="If the bot should ping you when it's done scraping.",
         scrape_threads="If the bot should scrape threads.",
+        download_attachments="If the bot should download attachments. This will likely take up a lot of storage space.",
     )
     @app_commands.check(breadcord.helpers.administrator_check)
     async def scrape(
@@ -248,16 +247,8 @@ class Scraper(breadcord.module.ModuleCog):
             await interaction.response.send_message("This command can only be used in a guild.", ephemeral=True)
             return
 
-        try:
-            message: discord.Message = await interaction.channel.send("Scraping...")
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "Aborting scrape.\n"
-                "Could not send message in this channel. Please make sure the bot has the correct permissions.",
-                ephemeral=True
-            )
-            return
-        await interaction.response.send_message("Starting to scrape.", ephemeral=True)
+        await interaction.response.defer()
+        message: discord.WebhookMessage = await interaction.followup.send("Scraping...", wait=True)
 
         try:
             if channel is None:
