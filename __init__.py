@@ -386,5 +386,5 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
             await response_message.reply(content=f"{interaction.user.mention} Scraping is done!")
 
 
-async def setup(bot: breadcord.Bot) -> None:
-    await bot.add_cog(Scraper("scraper"))
+async def setup(bot: breadcord.Bot, module: breadcord.module.Module) -> None:
+    await bot.add_cog(Scraper(module.id))
