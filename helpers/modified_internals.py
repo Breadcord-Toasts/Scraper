@@ -13,13 +13,17 @@ if TYPE_CHECKING:
 async def fetch_channel_history(
     channel: discord.abc.GuildChannel | discord.Thread,
     /, *,
-    message_limit: int | None = 100
+    message_limit: int | None = 100,
+    after_message_id: int | None = None,
 ) -> AsyncIterator["MessageDict"]:
     # Simplified version of
     # https://github.com/Rapptz/discord.py/blob/742630f1441d4b0b12a5fd9a751ab5cd1b39a5c6/discord/abc.py#L1647
     # using only the "after" strategy
 
-    after_message = discord.Object(id=0)
+    if after_message_id is not None:
+        after_message = discord.Object(id=after_message_id)
+    else:
+        after_message = discord.object.OLDEST_OBJECT
     while True:
         retrieve_count = 100 if message_limit is None else min(message_limit, 100)
         if retrieve_count < 1:
@@ -88,14 +92,19 @@ async def fetch_bans(guild: discord.Guild, /, *, limit: int | None = 1000) -> As
 
     # noinspection PyProtectedMember
     http = guild._state.http
-    after: discord.abc.Snowflake | discord.utils.MISSING = discord.utils.MISSING
+    # noinspection PyProtectedMember
+    after: discord.abc.Snowflake | discord.utils._MissingSentinel = discord.utils.MISSING
     while True:
         retrieve = 1000 if limit is None else min(limit, 1000)
         if retrieve < 1:
             return
 
         # This endpoint paginates in ascending order.
-        data = await http.get_bans(guild.id, limit=retrieve, after=after.id if after else None)
+        data = await http.get_bans(
+            guild.id,
+            limit=retrieve,
+            after=after.id if after else None,  # pyright: ignore [reportAttributeAccessIssue]  # Stupid
+        )
         if data:
             if limit is not None:
                 limit -= len(data)

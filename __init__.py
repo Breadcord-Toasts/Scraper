@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import json
+import os
 from collections.abc import Generator, Coroutine
 from pathlib import Path
 from typing import TypeVar, Sequence, cast, Protocol, Callable
@@ -12,6 +13,7 @@ from discord import app_commands
 
 import breadcord
 from .helpers.modified_internals import fetch_channel_history, fetch_members, fetch_bans
+from .helpers.output_parse import get_last_json_object
 
 _T = TypeVar("_T")
 
@@ -106,6 +108,7 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
 
             for thread in all_threads:
                 thread_dir = save_dir / "threads" / str(thread.id)
+                discord_logger(f"Scraping data from {thread.mention}", False)
 
                 await self.scrape_channel_metadata(thread, thread_dir / f"{thread.id}_metadata.json")
                 if message_limit is None or message_limit > 0:
@@ -127,23 +130,58 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
         message_limit: int | None = 100
     ) -> None:
         self.logger.debug(f"Scraping messages in {logger_channel_reference(channel)}...")
-        message_save_path.parent.mkdir(parents=True, exist_ok=True)
 
         if self.session is None or self.session.closed:
             raise ValueError("Session is closed.")
+
+        message_save_path.parent.mkdir(parents=True, exist_ok=True)
 
         permissions = channel.permissions_for(channel.guild.me)
         if not (permissions.read_message_history and permissions.read_messages):
             self.logger.debug(f"Skipping {logger_channel_reference(channel)} due to missing permissions.")
             return
 
+        last_msg_id: int | None = None
+        if message_save_path.is_file():
+            # THis here code is evil
+            try:
+                last_msg_obj = await get_last_json_object(message_save_path)
+            except Exception as error:
+                self.logger.exception(
+                    f"Failed to read last message in {logger_channel_reference(channel)}",
+                    exc_info=error,  # IDE screams otherwise
+                )
+            else:
+                last_msg_id: int | None = int(last_msg_id) if (last_msg_id := last_msg_obj.get("id")) else None
+                if last_msg_id is None:
+                    self.logger.error(f"Failed to get last message ID in {logger_channel_reference(channel)}")
+                else:
+                    self.logger.debug(
+                        f"Found last message in {logger_channel_reference(channel)} (id: {last_msg_id}). "
+                        "Preparing file for new insertions."
+                    )
+                    # Delete very last character ("]") to append a comma and start a new message
+                    async with aiofiles.open(message_save_path, mode="r+", encoding="utf-8") as messages_file:
+                        await messages_file.seek(0, os.SEEK_END)
+                        await messages_file.seek((await messages_file.tell()) - 1)
+                        await messages_file.truncate()
+
         try:
-            async with aiofiles.open(message_save_path, mode="w", encoding="utf-8") as messages_file:
+            async with (
+                aiofiles.open(message_save_path, mode="w", encoding="utf-8")
+                if last_msg_id is None
+                else aiofiles.open(message_save_path, mode="a", encoding="utf-8")
+            ) as messages_file:
                 # If a channel has a lot of messages, we can get a MemoryError on machines without a lot of RAM
-                # thus, we write each message one by one instead of them all in a list and then writing that
-                await messages_file.write("[")
+                # thus, we write each message one by one instead of saving them all in a list and then writing that
+                if last_msg_id is None:
+                    await messages_file.write("[")
                 first_element = True
-                async for message in fetch_channel_history(channel, message_limit=message_limit):
+                async for message in fetch_channel_history(
+                    channel,
+                    message_limit=message_limit,
+                    after_message_id=last_msg_id
+                ):
                     if attachment_save_dir is not None:
                         attachment_save_dir.mkdir(parents=True, exist_ok=True)
                         for attachment in message.get("attachments", []):
@@ -154,10 +192,13 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
                                 mode="wb"
                             ) as attachment_file, self.session.get(url) as response:
                                 await attachment_file.write(await response.read())
-                    await messages_file.write(("" if first_element else ",") + json.dumps(
-                        message,
-                        separators=(",", ":")  # Removes useless whitespace
-                    ))
+                    await messages_file.write(
+                        ("" if first_element and not last_msg_id else ",")
+                        + json.dumps(
+                            message,
+                            separators=(",", ":")  # Removes useless whitespace that'd increase file size
+                        )
+                    )
                     first_element = False
                 await messages_file.write("]")
         except discord.HTTPException as error:
@@ -345,14 +386,16 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
                     limit=self.simultaneous_channels
                 )
             else:
+                channel_dir = self.module.storage_path / "channels" / str(channel.id)
                 await self.scrape_channel(
                     channel=channel,
                     discord_logger=add_to_pool,
-                    save_dir=(save_dir := self.module.storage_path / "channels" / str(channel.id)),
-                    attachment_save_dir=save_dir / "attachments" if download_attachments else None,
+                    save_dir=channel_dir,
+                    attachment_save_dir=channel_dir / "attachments" if download_attachments else None,
                     message_limit=message_limit,
                     include_threads=scrape_threads
                 )
+
         except Exception:
             await response_message.edit(content="Scrape failed!")
             if logging_thread:
@@ -365,6 +408,8 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
                             or discord.utils.MISSING
                         ),
                     )
+            if notify_when_done:
+                await response_message.reply(content=f"{interaction.user.mention} Scrape failed!")
             raise
         else:
             await response_message.edit(content="Finished scraping.")
@@ -378,12 +423,11 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
                             or discord.utils.MISSING
                         ),
                     )
+            if notify_when_done:
+                await response_message.reply(content=f"{interaction.user.mention} Scrape finished!")
         finally:
             report_pool_task.cancel()
             await pool_report()  # In case any stragglers are left
-
-        if notify_when_done:
-            await response_message.reply(content=f"{interaction.user.mention} Scraping is done!")
 
 
 async def setup(bot: breadcord.Bot, module: breadcord.module.Module) -> None:
