@@ -28,7 +28,7 @@ class Identifiable(Protocol):
 
 
 def logger_channel_reference(channel: Identifiable, /) -> str:
-    return f"{type(channel).__name__} {channel.name} ({channel.id})"
+    return f'"{type(channel).__name__}" {channel.name} ({channel.id})'
 
 
 def chunked(iterable: Sequence[_T], chunk_size: int, /) -> Generator[Sequence[_T], None, None]:
@@ -78,7 +78,7 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
     ) -> None:
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        discord_logger(f"Scraping data from {channel.mention}", False)
+        discord_logger(f"Scraping data from {channel.mention} `#{channel.name}`", False)
         await self.scrape_channel_metadata(channel, save_dir / f"{channel.id}_metadata.json")
         # Categories don't have messages
         if isinstance(channel, discord.CategoryChannel):
@@ -108,7 +108,7 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
 
             for thread in all_threads:
                 thread_dir = save_dir / "threads" / str(thread.id)
-                discord_logger(f"Scraping data from {thread.mention}", False)
+                discord_logger(f"Scraping data from {thread.mention} `#{thread.name}`", False)
 
                 await self.scrape_channel_metadata(thread, thread_dir / f"{thread.id}_metadata.json")
                 if message_limit is None or message_limit > 0:
@@ -157,7 +157,7 @@ class Scraper(breadcord.helpers.HTTPModuleCog):
                     self.logger.error(f"Failed to get last message ID in {logger_channel_reference(channel)}")
                 else:
                     self.logger.debug(
-                        f"Found last message in {logger_channel_reference(channel)} (id: {last_msg_id}). "
+                        f"Found last message in {logger_channel_reference(channel)} (msg id: {last_msg_id}). "
                         "Preparing file for new insertions."
                     )
                     # Delete very last character ("]") to append a comma and start a new message
